@@ -34,6 +34,7 @@ struct Status{
   std::mutex mtx;
   //std::array<std::unordered_map<long unsigned int, std::tuple< zmq_msg_t *, zmq_msg_t*> >, NUM_STREAMS> cache;
   std::array<std::unordered_map<long unsigned int, zmq_msg_t* >, NUM_STREAMS> cache;
+  std::array<std::unordered_map<long unsigned int, zmq_msg_t* >, NUM_STREAMS> header;
 };
 
 // Function to find common keys in an array of unordered_maps and return them sorted
@@ -71,7 +72,6 @@ void my_free (void *data, void *hint)
 }
 
 void Correlate(Status *stat) {
-  int done  = -1;
   while (!stat->terminate) {
     sem_wait(&(stat->available));
     std::cout << "Correlate cache" << std::endl;
@@ -88,28 +88,27 @@ void Correlate(Status *stat) {
       auto keys = getCommonKeysSorted(stat->cache);
       for (const auto k: keys) {
         std::cout << "common key " << k << std::endl;
-        if (k <= done) {
-          continue;
-        }
         for (int i=0; i<NUM_STREAMS; i++) {
           std::cout << "send out stream "<< i << std::endl;
           //auto hmsg = std::get<0>(stat->cache[i][k]);
           //auto msg = std::get<1>(stat->cache[i][k]);
+          auto hmsg = stat->header[i][k];
           auto msg = stat->cache[i][k];
           //printf("hmsg %x, msg %x\n", hmsg, msg);
           printf("msg %x\n", msg);
-          //zmq_msg_send(hmsg, stat->responder, ZMQ_SNDMORE);
+          zmq_msg_send(hmsg, stat->responder, ZMQ_SNDMORE);
           int flag = ZMQ_SNDMORE;
           if (i == NUM_STREAMS-1) {
             flag = 0;
           }
 
           stat->cache[i].erase(k);
+          stat->header[i].erase(k);
 
           printf("msg after erase %x\n", msg);
           
           zmq_msg_send(msg, stat->responder, flag);
-          done = k;
+          
           //printf("after hmsg %x, msg %x\n", hmsg, msg);
           //free ( stat->cache[i][k]);
           //
@@ -214,10 +213,14 @@ void GetData(slsDetectorDefs::sls_receiver_header &header, char *dataPointer,
     std::string message = oss.str();
     int length = message.length();
 
-    std::cout << detectorHeader.column << ":creating json part" << std::endl;    
-    zmq_msg_t hmsg;
+    char* hdata = new char[length];
 
-    zmq_msg_init_data (&hmsg, &message, length, my_free, NULL);
+    memcpy(hdata, &message, length);
+
+    std::cout << detectorHeader.column << ":creating json part" << std::endl;    
+    zmq_msg_t *hmsg = new zmq_msg_t;
+
+    zmq_msg_init_data (hmsg, hdata, length, my_free, NULL);
 
     std::cout << detectorHeader.column << "created header frame" << std::endl;
     //zmq_msg_init_buffer (&hmsg, message, length);
@@ -231,7 +234,7 @@ void GetData(slsDetectorDefs::sls_receiver_header &header, char *dataPointer,
 
     std::cout << detectorHeader.column << "copied buffer" << std::endl;
     zmq_msg_t *msg = new zmq_msg_t;
-    zmq_msg_init_data (msg, &data, imageSize, my_free, NULL);
+    zmq_msg_init_data (msg, data, imageSize, my_free, NULL);
 
     std::cout << detectorHeader.column << "copied data to data frame" << std::endl;
     //zmq_msg_init_buffer (&msg, dataPointer, imageSize);
@@ -244,6 +247,7 @@ void GetData(slsDetectorDefs::sls_receiver_header &header, char *dataPointer,
       //stat->cache[0][(long unsigned int)42] = nullptr;
       std::cout << detectorHeader.column << "put data in cache" << std::endl;
       stat->cache[detectorHeader.column][(long unsigned int)detectorHeader.frameNumber] = msg;
+      stat->header[detectorHeader.column][(long unsigned int)detectorHeader.frameNumber] = hmsg;
     }
     std::cout << detectorHeader.column << "call not correlate" << std::endl;
     sem_post(&stat->available);
