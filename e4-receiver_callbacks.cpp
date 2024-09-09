@@ -68,7 +68,7 @@ std::vector<int> getCommonKeysSorted(std::array<std::unordered_map<long unsigned
 void my_free (void *data, void *hint)
 {
     //printf("myfree %x\n", data);
-    //free (data);
+    free (data);
 }
 
 void Correlate(Status *stat) {
@@ -88,6 +88,17 @@ void Correlate(Status *stat) {
       auto keys = getCommonKeysSorted(stat->cache);
       for (const auto k: keys) {
         std::cout << "common key " << k << std::endl;
+
+        std::ostringstream oss;
+        oss << "{\"htype\":\"modules\""
+            << ", \"msg_number\":" << stat->msg_number
+            << ", \"frame\":" << k
+            << "\"}\n";
+        stat->msg_number++;
+        std::string message = oss.str();
+        int length = message.length();
+        zmq_send(stat->responder, message.c_str(), length,  ZMQ_SNDMORE|ZMQ_DONTWAIT);
+
         for (int i=0; i<NUM_STREAMS; i++) {
           std::cout << "send out stream "<< i << std::endl;
           //auto hmsg = std::get<0>(stat->cache[i][k]);
@@ -96,7 +107,7 @@ void Correlate(Status *stat) {
           auto msg = stat->cache[i][k];
           //printf("hmsg %x, msg %x\n", hmsg, msg);
           printf("msg %x\n", msg);
-          zmq_msg_send(hmsg, stat->responder, ZMQ_SNDMORE);
+          zmq_msg_send(hmsg, stat->responder, ZMQ_SNDMORE|ZMQ_DONTWAIT);
           int flag = ZMQ_SNDMORE;
           if (i == NUM_STREAMS-1) {
             flag = 0;
@@ -107,7 +118,7 @@ void Correlate(Status *stat) {
 
           printf("msg after erase %x\n", msg);
           
-          zmq_msg_send(msg, stat->responder, flag);
+          zmq_msg_send(msg, stat->responder, flag|ZMQ_DONTWAIT);
           
           //printf("after hmsg %x, msg %x\n", hmsg, msg);
           //free ( stat->cache[i][k]);
@@ -141,7 +152,7 @@ int StartAcq(const std::string &filePath, const std::string &fileName,
     try{
       {
         std::lock_guard<std::mutex> lock(stat->mtx);
-        //zmq_send(stat->responder, message.c_str(), length, ZMQ_DONTWAIT);
+        zmq_send(stat->responder, message.c_str(), length, ZMQ_DONTWAIT);
         stat->msg_number++;
       }
     } catch (...) {
@@ -167,7 +178,18 @@ void AcquisitionFinished(uint64_t framesCaught, void *objectPointer) {
     try{
       {
         std::lock_guard<std::mutex> lock(stat->mtx);
-        //zmq_send(stat->responder, message.c_str(), length, ZMQ_DONTWAIT);
+
+        for (auto& sc : stat->cache) {
+          std::cout << "clear cache for stream" << std::endl;
+          for (auto& pair : sc) {
+              std::cout << "clear data" << pair.first << std::endl;
+              zmq_msg_close(pair.second);
+              free(pair.second);
+          }
+          sc.clear();
+        }
+
+        zmq_send(stat->responder, message.c_str(), length, ZMQ_DONTWAIT);
         stat->msg_number++;
       }
     } catch (...) {
@@ -215,7 +237,7 @@ void GetData(slsDetectorDefs::sls_receiver_header &header, char *dataPointer,
 
     char* hdata = new char[length];
 
-    memcpy(hdata, &message, length);
+    memcpy(hdata, message.c_str(), length);
 
     std::cout << detectorHeader.column << ":creating json part" << std::endl;    
     zmq_msg_t *hmsg = new zmq_msg_t;
